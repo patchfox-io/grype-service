@@ -2,9 +2,14 @@ package io.patchfox.grype_service.services;
 
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
+import java.sql.Connection;
+import java.sql.DriverManager;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.ZonedDateTime;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -14,6 +19,7 @@ import java.util.UUID;
 import org.apache.catalina.connector.Response;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.converter.json.Jackson2ObjectMapperBuilder;
+import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
 
 import io.patchfox.db_entities.entities.Datasource;
@@ -66,6 +72,17 @@ public class GrypeService {
 
     @Autowired
     DatasourceRepository datasourceRepository;
+
+    @Autowired
+    JdbcTemplate jdbcTemplate;
+
+    private void setOssEnrichedFlag(Long datasourceEventId) {
+        jdbcTemplate.update(
+            "UPDATE datasource_event SET oss_enriched = true, status = 'READY_FOR_NEXT_PROCESSING' WHERE id = ?",
+            datasourceEventId
+        );
+        log.info("Set oss_enriched flag via JDBC for datasourceEvent id: {}", datasourceEventId);
+    }
 
     public ApiResponse enrichWithGrypeOssPackageData(
             UUID txid,
@@ -125,17 +142,36 @@ public class GrypeService {
                                                                              .map(x -> x.getData())
                                                                              .toList();
 
+                // Enrich ossSummaries with published dates from Grype vulnerability database
+                var vulnerabilityIds = ossSummaries.stream()
+                    .map(OssSummary::getVulnerabilityId)
+                    .filter(id -> id != null && !id.isEmpty())
+                    .toList();
+
+                var publishedDates = getPublishedDatesFromGrypeDb(vulnerabilityIds);
+
+                // Set published dates on ossSummaries
+                for (var ossSummary : ossSummaries) {
+                    if (ossSummary.getPublishedAt() == null) {
+                        ZonedDateTime publishedDate = publishedDates.get(ossSummary.getVulnerabilityId());
+                        if (publishedDate != null) {
+                            ossSummary.setPublishedAt(publishedDate);
+                        }
+                    }
+                }
+
                 for (var ossSummary : ossSummaries) {
                     findingRepository.storeFindingData(
-                        setToSqlArrayString(ossSummary.getReporters()), 
-                        setToSqlArrayString(ossSummary.getCpes()), 
-                        ossSummary.getDescription(), 
-                        ossSummary.getVulnerabilityId(), 
-                        setToSqlArrayString(ossSummary.getFixedIn()), 
-                        requestReceivedAt, 
-                        ossSummary.getSeverity().toString(), 
+                        setToSqlArrayString(ossSummary.getReporters()),
+                        setToSqlArrayString(ossSummary.getCpes()),
+                        ossSummary.getDescription(),
+                        ossSummary.getVulnerabilityId(),
+                        setToSqlArrayString(ossSummary.getFixedIn()),
+                        requestReceivedAt,
+                        ossSummary.getSeverity().toString(),
                         ossSummary.getPurl().getCoordinates(),
-                        ","
+                        ",",
+                        ossSummary.getPublishedAt()
                     );
 
                     // this shouldn't fucking be necessary given this is a stored proc but w/o it memory blows up 
@@ -165,15 +201,15 @@ public class GrypeService {
                 var datasourceEventTxid = altTxid.isPresent() ? altTxid.get() : txid;
                 log.info("txid: {}  altTxid: {}  datasourceEventTxid: {}", txid, altTxid, datasourceEventTxid);
 
-                //datasourceEventRecord.setOssEnriched(true);
-                datasourceEventRecord.setPayload(mapperBuilder.build().writeValueAsBytes(packageWrapper));
-                //datasourceEventRecord.setStatus(DatasourceEvent.Status.READY_FOR_NEXT_PROCESSING);
-                datasourceEventRecord = datasourceEventRepository.save(datasourceEventRecord);
-                datasourceEventRepository.flush();
-
-                // because the way hibernate updates these records it can stomp on the status flag setting
-                // of another enrichment service by way of race condition 
-                datasourceEventRepository.setStatusFlagsFor(datasourceEventRecord.getId());
+                // Update payload and set oss_enriched flag via JDBC to avoid overwriting other enrichment service flags
+                byte[] payloadBytes = mapperBuilder.build().writeValueAsBytes(packageWrapper);
+                byte[] compressedPayload = compressPayload(payloadBytes);
+                jdbcTemplate.update(
+                    "UPDATE datasource_event SET payload = ?, oss_enriched = true, status = 'READY_FOR_NEXT_PROCESSING' WHERE id = ?",
+                    compressedPayload,
+                    datasourceEventRecord.getId()
+                );
+                log.info("Set oss_enriched flag and updated payload via JDBC for datasourceEvent id: {}", datasourceEventRecord.getId());
 
                 var updateDatasourceEventRecordDone = Instant.now();
                 log.info("updateDatasourceEventRecordDone duration: {}", Duration.between(serializeFindingsToDbDone, updateDatasourceEventRecordDone));
@@ -224,5 +260,84 @@ public class GrypeService {
                 .replace("[", "")
                 .replace("]", "")
                 .replace(" ", "");
+    }
+
+    /**
+     * Compress payload bytes using Deflater to match DatasourceEvent entity compression
+     * @param payload Raw payload bytes
+     * @return Compressed payload bytes
+     */
+    private byte[] compressPayload(byte[] payload) throws IOException {
+        java.util.zip.Deflater deflater = new java.util.zip.Deflater();
+        deflater.setInput(payload);
+        deflater.finish();
+
+        try (java.io.ByteArrayOutputStream outputStream = new java.io.ByteArrayOutputStream()) {
+            byte[] buffer = new byte[1024];
+
+            while (!deflater.finished()) {
+                int compressedSize = deflater.deflate(buffer);
+                outputStream.write(buffer, 0, compressedSize);
+            }
+
+            deflater.end();
+            return outputStream.toByteArray();
+        }
+    }
+
+    /**
+     * Query the Grype vulnerability database to get published dates for CVEs/GHSAs
+     * @param vulnerabilityIds List of vulnerability IDs (CVE-*, GHSA-*, etc.)
+     * @return Map of vulnerability ID to published date
+     */
+    private Map<String, ZonedDateTime> getPublishedDatesFromGrypeDb(List<String> vulnerabilityIds) {
+        Map<String, ZonedDateTime> publishedDates = new HashMap<>();
+
+        if (vulnerabilityIds == null || vulnerabilityIds.isEmpty()) {
+            return publishedDates;
+        }
+
+        String grypeDbPath = "/root/.cache/grype/db/6/vulnerability.db";
+        String jdbcUrl = "jdbc:sqlite:" + grypeDbPath;
+
+        try (Connection conn = DriverManager.getConnection(jdbcUrl)) {
+            // Build IN clause for SQL query
+            String placeholders = String.join(",", vulnerabilityIds.stream()
+                .map(id -> "?")
+                .toList());
+
+            String sql = "SELECT name, published_date FROM vulnerability_handles WHERE name IN (" + placeholders + ")";
+
+            try (PreparedStatement stmt = conn.prepareStatement(sql)) {
+                // Set parameters
+                for (int i = 0; i < vulnerabilityIds.size(); i++) {
+                    stmt.setString(i + 1, vulnerabilityIds.get(i));
+                }
+
+                try (ResultSet rs = stmt.executeQuery()) {
+                    while (rs.next()) {
+                        String vulnId = rs.getString("name");
+                        String publishedDateStr = rs.getString("published_date");
+
+                        if (publishedDateStr != null && !publishedDateStr.isEmpty()) {
+                            try {
+                                // Parse the date string from SQLite (format: "YYYY-MM-DD HH:MM:SS+00:00")
+                                ZonedDateTime publishedDate = ZonedDateTime.parse(publishedDateStr.replace(" ", "T"));
+                                publishedDates.put(vulnId, publishedDate);
+                            } catch (Exception e) {
+                                log.warn("Failed to parse published_date for {}: {}", vulnId, publishedDateStr);
+                            }
+                        }
+                    }
+                }
+            }
+
+            log.info("Enriched {} vulnerabilities with published dates from Grype DB", publishedDates.size());
+
+        } catch (Exception e) {
+            log.error("Failed to query Grype vulnerability database: {}", e.getMessage());
+        }
+
+        return publishedDates;
     }
 }

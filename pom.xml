@@ -12,7 +12,7 @@
 	
 	<groupId>io.patchfox.grype_service</groupId>
 	<artifactId>grype-service</artifactId>
-	<version>0.0.32</version>
+	<version>0.0.37</version>
 	<name>grype-service</name>
 	<description>The grype service is responsible for running grype OSS scanner against a given sbom file.</description>
 	
@@ -58,7 +58,7 @@
 		<dependency>
   			<groupId>io.patchfox.utils</groupId>
   			<artifactId>package-utils</artifactId>
-  			<version>1.0.9</version>			
+  			<version>1.0.10</version>
 		</dependency>
 
 		<dependency>
@@ -90,6 +90,12 @@
         	<artifactId>packageurl-java</artifactId>
         	<version>1.5.0</version>
     	</dependency>
+
+		<dependency>
+			<groupId>org.xerial</groupId>
+			<artifactId>sqlite-jdbc</artifactId>
+			<version>3.47.2.0</version>
+		</dependency>
 
 		<!-- PROVIDED -->
 		<dependency>

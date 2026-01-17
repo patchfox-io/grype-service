@@ -22,19 +22,20 @@ public interface FindingRepository extends JpaRepository<Finding, Long> {
 
     @Transactional
     @Query(
-        value = "SELECT STORE_FINDING_DATA(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)", 
+        value = "SELECT STORE_FINDING_DATA(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
         nativeQuery = true
     )
     void storeFindingData(
         String findingReporters,
-        String cpes, 
-        String description, 
-        String identifier, 
-        String patchedIn, 
-        ZonedDateTime reportedAt, 
+        String cpes,
+        String description,
+        String identifier,
+        String patchedIn,
+        ZonedDateTime reportedAt,
         String severity,
         String purl,
-        String arrayDelimiter
+        String arrayDelimiter,
+        ZonedDateTime publishedAt
     );
 
 }

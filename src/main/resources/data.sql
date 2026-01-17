@@ -111,15 +111,16 @@
 
 CREATE OR REPLACE FUNCTION STORE_FINDING_DATA(
     finding_reporters_arg_str_encoded_array varchar,
-    cpes_arg_str_encoded_array varchar, 
-    description_arg varchar, 
-    identifier_arg varchar, 
-    patched_in_arg_str_encoded_array varchar, 
-    reported_at_arg timestamptz, 
+    cpes_arg_str_encoded_array varchar,
+    description_arg varchar,
+    identifier_arg varchar,
+    patched_in_arg_str_encoded_array varchar,
+    reported_at_arg timestamptz,
     severity_arg varchar,
     purl_arg varchar,
-    array_delimiter_arg varchar
-) 
+    array_delimiter_arg varchar,
+    published_at_arg timestamptz
+)
 RETURNS void
 AS '
 DECLARE
@@ -135,29 +136,30 @@ BEGIN
     patched_in_arg := string_to_array(patched_in_arg_str_encoded_array, array_delimiter_arg);
 
     -- Step 1: Bulk insert finding_reporters (avoid loop)
-    INSERT INTO finding_reporter (name) 
+    INSERT INTO finding_reporter (name)
     SELECT DISTINCT unnest(finding_reporters_arg)
     ON CONFLICT DO NOTHING;
 
     -- Step 2: Insert finding if it does not exist and get ID
-    INSERT INTO finding (identifier) 
+    INSERT INTO finding (identifier)
     VALUES (identifier_arg)
     ON CONFLICT (identifier) DO NOTHING;
-    
+
     SELECT id INTO finding_pk FROM finding WHERE identifier = identifier_arg;
 
     -- Step 3: Insert finding_data with finding_id
-    INSERT INTO finding_data (cpes, description, identifier, patched_in, reported_at, severity, finding_id) 
+    INSERT INTO finding_data (cpes, description, identifier, patched_in, reported_at, severity, finding_id, published_at)
     VALUES (
-        cpes_arg, 
-        description_arg, 
+        cpes_arg,
+        description_arg,
         identifier_arg,
         patched_in_arg,
         reported_at_arg,
         severity_arg,
-        finding_pk
+        finding_pk,
+        published_at_arg
     )
-    ON CONFLICT (identifier) DO UPDATE SET finding_id = EXCLUDED.finding_id;
+    ON CONFLICT (identifier) DO UPDATE SET finding_id = EXCLUDED.finding_id, published_at = EXCLUDED.published_at;
 
     -- Step 4: Bulk insert finding to reporter relationships
     INSERT INTO finding_to_reporter (finding_id, reporter_id)
