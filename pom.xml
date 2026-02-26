@@ -12,7 +12,7 @@
 	
 	<groupId>io.patchfox.grype_service</groupId>
 	<artifactId>grype-service</artifactId>
-	<version>0.0.38</version>
+	<version>0.0.39</version>
 	<name>grype-service</name>
 	<description>The grype service is responsible for running grype OSS scanner against a given sbom file.</description>
 	
@@ -64,7 +64,7 @@
 		<dependency>
   			<groupId>io.patchfox.db-entities</groupId>
   			<artifactId>db-entities</artifactId>
-  			<version>1.0.33</version>			
+  			<version>1.0.34</version>			
 		</dependency>
 
 		<dependency>
